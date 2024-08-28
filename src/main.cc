@@ -4,8 +4,9 @@
 #include <bit>
 #include <chrono>
 #include <cstdint>
-#include <deque>
+#include <numeric>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "format.hh"
@@ -18,58 +19,69 @@
 using namespace stlpb;
 using namespace std;
 using namespace maf;
-using Number = I64;
+using Number = I32;
 
-constexpr Number kExtractors[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19};
+constexpr Number kExtractors[] = {1,  2,  3,  4,  5,  6,  7,  8,  9, 11,
+                                  12, 13, 14, 15, 16, 17, 18, 19, 20};
 constexpr int kBeltsPerExtractor = 6;
 constexpr int kNExtractors = sizeof(kExtractors) / sizeof(*kExtractors);
 constexpr int N = 100001;
-constexpr int kMaxCost = 8;
+constexpr int kMaxCost = 40;
 
 struct Step {
   enum class Type : uint8_t { Extract, Add, Mul, Sub, Sub2, Div, Rem, Exp, Exp2 };
   using enum Type;
-  Number value;
   Type type;
-  int8_t a, b;  // negative values indicate how far back to move for a given argument
+  union {
+    struct {
+      int8_t a, b;  // negative values indicate how far back to move for a given argument
+    };
+    uint16_t extractor;
+  };
 };
 
 struct Plan {
+  Number value;
   uint8_t cost = 0;
   uint8_t ops = 0;
   uint32_t extractors;
-  static_vector<Step, 20> steps;
+  vector<Step> steps;
   bool operator<(const Plan& other) const { return cost > other.cost; }
-  Number Value() const { return steps.back().value; }
 };
 
-static bool NumberValid(Number a, Number b, Number result) {
-  return result > 0 && result < N && result != a && result != b;
+static constexpr int extractor_cost(int different_extractors) {
+  switch (different_extractors) {
+    case 0:
+    case 1:
+      return 0;
+    case 2:
+      return 3;
+    case 3:
+      return 6;
+    case 4:
+      return 9;
+    case 5:
+      return 12;
+    default:
+      return kMaxCost;
+  }
 }
 
 template <typename T>
 struct Op {
-  static Number Valid(Number a, Number b) {
-    auto result = T::Apply(a, b);
-    if (NumberValid(a, b, result)) {
-      return result;
-    } else {
-      return 0;
-    }
-  }
-
   static Plan Combine(const Plan& a, const Plan& b) {
     Plan ret = {
+        .value = T::Apply(a.value, b.value),
         .cost = 0,
         .ops = U8(a.ops + b.ops + T::extra_ops),
     };
-    // ret.steps.reserve(a.steps.size() + b.steps.size() + 3);
+    ret.steps.reserve(a.steps.size() + b.steps.size() + 3);
     ret.steps.insert(ret.steps.end(), a.steps.begin(), a.steps.end());
     ret.steps.insert(ret.steps.end(), b.steps.begin(), b.steps.end());
     T::AddSteps(ret, a, b);
     ret.extractors = a.extractors | b.extractors;
     int different_extractors = popcount(ret.extractors);
-    ret.cost = ret.ops + different_extractors * (different_extractors - 1);
+    ret.cost = ret.ops + extractor_cost(different_extractors);
     return ret;
   }
 };
@@ -77,11 +89,14 @@ struct Op {
 struct AddOp : Op<AddOp> {
   static const int extra_ops = 1;
   static const Step::Type type = Step::Add;
-  static Number Apply(Number a, Number b) { return a + b; }
+  static Number Apply(Number a, Number b) {
+    auto ret = I64(a) + I64(b);
+    if (ret >= N) return 0;
+    return ret;
+  }
 
   static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
     plan.steps.push_back(Step{
-        .value = Apply(a.Value(), b.Value()),
         .type = type,
         .a = (int8_t)(-b.steps.size() - 1),
         .b = (int8_t)(-1),
@@ -92,11 +107,14 @@ struct AddOp : Op<AddOp> {
 struct MulOp : Op<MulOp> {
   static const int extra_ops = 1;
   static const Step::Type type = Step::Mul;
-  static Number Apply(Number a, Number b) { return a * b; }
+  static Number Apply(Number a, Number b) {
+    auto ret = I64(a) * I64(b);
+    if (ret >= N) return 0;
+    return ret;
+  }
 
   static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
     plan.steps.push_back(Step{
-        .value = Apply(a.Value(), b.Value()),
         .type = type,
         .a = (int8_t)(-b.steps.size() - 1),
         .b = (int8_t)(-1),
@@ -111,7 +129,6 @@ struct SubOp : Op<SubOp> {
 
   static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
     plan.steps.push_back(Step{
-        .value = Apply(a.Value(), b.Value()),
         .type = type,
         .a = (int8_t)(-b.steps.size() - 1),
         .b = (int8_t)(-1),
@@ -122,11 +139,10 @@ struct SubOp : Op<SubOp> {
 struct Sub2Op : Op<Sub2Op> {
   static const int extra_ops = 1;
   static const Step::Type type = Step::Sub2;
-  static Number Apply(Number a, Number b) { return b - a; }
+  static Number Apply(Number a, Number b) { SubOp::Apply(b, a); }
 
   static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
     plan.steps.push_back(Step{
-        .value = Apply(a.Value(), b.Value()),
         .type = type,
         .a = (int8_t)(-b.steps.size() - 1),
         .b = (int8_t)(-1),
@@ -138,8 +154,10 @@ struct ExpOp : Op<ExpOp> {
   static const int extra_ops = 1;
   static const Step::Type type = Step::Exp;
   static Number Apply(Number a, Number b) {
-    Number result = 1;
-    for (Number i = 0; i < b; ++i) {
+    if (a == 0) return 0;
+    if (a == 1) return 1;
+    I64 result = a;
+    for (Number i = 1; i < b; ++i) {
       result *= a;
       if (result >= N) return 0;
     }
@@ -148,7 +166,6 @@ struct ExpOp : Op<ExpOp> {
 
   static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
     plan.steps.push_back(Step{
-        .value = Apply(a.Value(), b.Value()),
         .type = type,
         .a = (int8_t)(-b.steps.size() - 1),
         .b = (int8_t)(-1),
@@ -159,18 +176,10 @@ struct ExpOp : Op<ExpOp> {
 struct Exp2Op : Op<Exp2Op> {
   static const int extra_ops = 1;
   static const Step::Type type = Step::Exp2;
-  static Number Apply(Number b, Number a) {
-    Number result = 1;
-    for (Number i = 0; i < b; ++i) {
-      result *= a;
-      if (result >= N) return 0;
-    }
-    return result;
-  }
+  static Number Apply(Number a, Number b) { return ExpOp::Apply(b, a); }
 
   static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
     plan.steps.push_back(Step{
-        .value = Apply(a.Value(), b.Value()),
         .type = type,
         .a = (int8_t)(-b.steps.size() - 1),
         .b = (int8_t)(-1),
@@ -188,20 +197,41 @@ struct DivAnd : Op<DivAnd<Base>> {
 
   static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
     plan.steps.push_back(Step{
-        .value = Number(a.Value() / b.Value()),
         .type = Step::Div,
         .a = (int8_t)(-b.steps.size() - 1),
         .b = (int8_t)(-1),
     });
     plan.steps.push_back(Step{
-        .value = Number(a.Value() % b.Value()),
         .type = Step::Rem,
         .a = (int8_t)(-b.steps.size() - 2),
         .b = (int8_t)(-2),
     });
     plan.steps.push_back(Step{
         .type = Base::type,
-        .value = Apply(a.Value(), b.Value()),
+        .a = (int8_t)(-2),
+        .b = (int8_t)(-1),
+    });
+  }
+};
+
+template <typename Base>
+struct Div2And : Op<Div2And<Base>> {
+  static const int extra_ops = 2;
+  static Number Apply(Number a, Number b) { DivAnd<Base>::Apply(b, a); }
+
+  static void AddSteps(Plan& plan, const Plan& a, const Plan& b) {
+    plan.steps.push_back(Step{
+        .type = Step::Div,
+        .a = (int8_t)(-1),
+        .b = (int8_t)(-b.steps.size() - 1),
+    });
+    plan.steps.push_back(Step{
+        .type = Step::Rem,
+        .a = (int8_t)(-2),
+        .b = (int8_t)(-b.steps.size() - 2),
+    });
+    plan.steps.push_back(Step{
+        .type = Base::type,
         .a = (int8_t)(-2),
         .b = (int8_t)(-1),
     });
@@ -212,7 +242,7 @@ Str ToStr(const Plan& plan, uint8_t step) {
   auto& s = plan.steps[step];
 
   if (s.type == Step::Extract) {
-    return f("%d", s.value);
+    return f("%d", s.extractor);
   }
   auto a = ToStr(plan, step + s.a);
   auto b = ToStr(plan, step + s.b);
@@ -247,22 +277,91 @@ Str ToStr(const Plan& plan, uint8_t step) {
 }
 
 Str ToStr(const Plan& plan) {
-  return f("> %d = %s [cost %d]", plan.Value(), ToStr(plan, plan.steps.size() - 1).c_str(),
+  return f("> %d = %s [cost %d]", plan.value, ToStr(plan, plan.steps.size() - 1).c_str(),
            plan.cost);
 }
 static_vector<Plan, 10> plans[N];
 
 constexpr size_t memory_usage = sizeof(plans) / 1024 / 1024;
 
+vector<Plan> q;
+mutex q_mutex;
+
+constexpr int kUniqueSlack = 3;
+
+unordered_set<U64> visited;
+
+static U64 encode(U64 value, U64 extractors, U64 cost) {
+  return cost | value << 8 | extractors << 32;
+}
+
+static U64 encode(const Plan& plan) { return encode(plan.value, plan.extractors, plan.cost); }
+
+template <typename Op>
+void Consider(const Plan& plan_a) {
+  auto value_a = plan_a.value;
+  vector<Plan> out_plans;
+
+  for (Number value_b = 1; value_b < N; ++value_b) {
+    auto new_value = Op::Apply(value_a, value_b);
+    if (new_value <= 0 || new_value >= N || new_value == value_a || new_value == value_b) {
+      continue;
+    }
+
+    if (plans[value_b].empty()) continue;
+
+    auto& other_plans = plans[new_value];
+    auto rough_cost_estimate = plan_a.cost + Op::extra_ops - kUniqueSlack;
+    if (rough_cost_estimate > kMaxCost) {
+      return;
+    }
+    if (!other_plans.empty() && other_plans.front().cost < rough_cost_estimate) {
+      return;
+    }
+    for (const auto& plan_b : plans[value_b]) {
+      auto new_extractors = plan_a.extractors | plan_b.extractors;
+      int different_extractors = popcount(new_extractors);
+      auto new_cost =
+          plan_a.ops + plan_b.ops + Op::extra_ops + extractor_cost(different_extractors);
+      if (new_cost > kMaxCost) {
+        continue;
+      }
+      if (visited.count(encode(new_value, new_extractors, new_cost))) {
+        continue;
+      }
+
+      bool unique = true;
+      for (auto& other_plan : other_plans) {
+        if (new_extractors == other_plan.extractors) {
+          unique = false;
+        }
+      }
+      int slack = unique ? kUniqueSlack : 0;
+      if (!other_plans.empty() && other_plans.front().cost < new_cost - slack) {
+        continue;
+      }
+      auto new_plan = Op::Combine(plan_a, plan_b);
+      out_plans.push_back(new_plan);
+    }
+  }
+
+  if (!out_plans.empty()) {
+    lock_guard<mutex> lock(q_mutex);
+    for (auto& new_plan : out_plans) {
+      q.push_back(new_plan);
+      push_heap(q.begin(), q.end());
+    }
+  }
+};
+
 int main() {
-  vector<Plan> q;
   q.reserve(N * 10);
-  mutex q_mutex;
   for (int i = 0; i < kNExtractors; ++i) {
-    q.push_back(Plan{.cost = 1,
+    q.push_back(Plan{.value = kExtractors[i],
+                     .cost = 1,
                      .ops = 0,
                      .steps = {
-                         Step{.type = Step::Extract, .value = kExtractors[i], .a = 0, .b = 0},
+                         Step{.type = Step::Extract, .extractor = (U16)kExtractors[i]},
                      }});
     q.back().extractors |= 1 << i;
   }
@@ -276,9 +375,6 @@ int main() {
     auto plan_a = q.back();
     q.pop_back();
 
-    auto value_a = plan_a.Value();
-    auto& plans_a = plans[value_a];
-
     ++iteration;
 
     if (iteration % kLogEvery == 0) {
@@ -291,87 +387,96 @@ int main() {
       improvements = 0;
     }
 
-    if (plans_a.empty()) {
-      ++improvements;
-    } else {
-      if (plans_a.front().cost > plan_a.cost) {
-        plans_a.clear();
-        ++improvements;
-      } else if (plans_a.front().cost < plan_a.cost) {
-        continue;
-      } else if (plans_a.front().cost == plan_a.cost) {
-        bool redundant = false;
-        for (auto& other_plan : plans_a) {
-          if (plan_a.extractors == other_plan.extractors) {
-            redundant = true;
-          }
-        }
-        if (redundant) {
-          continue;
-        }
+    auto key = encode(plan_a);
+    if (visited.count(key)) {
+      continue;
+    }
+    visited.insert(key);
+
+    auto value_a = plan_a.value;
+    auto& plans_a = plans[value_a];
+
+    bool unique = true;
+    for (auto& other_plan : plans_a) {
+      if (plan_a.extractors == other_plan.extractors) {
+        unique = false;
       }
     }
-    plans_a.push_back(plan_a);
 
-#pragma omp parallel for
-    for (Number value_b = 1; value_b < N; ++value_b) {
-      auto& plans_b = plans[value_b];
-      if (plans_b.empty()) continue;
+    int current_best = plans_a.empty() ? kMaxCost + 1 : plans_a.front().cost;
+    if (current_best > plan_a.cost) {
+      ++improvements;
+      plans_a.clear();
+      plans_a.push_back(plan_a);
+    } else if (current_best == plan_a.cost && unique) {
+      plans_a.push_back(plan_a);
+    }
 
-      auto Consider = [&](auto op) {
-        auto new_value = op.Valid(value_a, value_b);
-        if (new_value == 0) {
-          return;
-        }
-        auto& other_plans = plans[new_value];
-        auto rough_cost_estimate = plan_a.cost + op.extra_ops + 1;
-        if (rough_cost_estimate > kMaxCost) {
-          return;
-        }
-        if (!other_plans.empty() && other_plans.front().cost < rough_cost_estimate) {
-          return;
-        }
-        for (auto& plan_b : plans_b) {
-          // optimistic estimate, assuming extractors combine perfectly
-          // without increasing cost
-          auto new_cost = plan_a.ops + plan_b.ops + op.extra_ops;
-          int different_extractors = popcount(plan_a.extractors | plan_b.extractors);
-          new_cost += different_extractors * (different_extractors - 1);
-          if (new_cost > kMaxCost) {
-            continue;
-          }
-          if (!other_plans.empty() && other_plans.front().cost < new_cost) {
-            continue;
-          }
-          auto new_plan = op.Combine(plan_a, plan_b);
-          {
-            lock_guard<mutex> lock(q_mutex);
-            q.push_back(new_plan);
-            push_heap(q.begin(), q.end());
-          }
-        }
-      };
+    if (unique) {
+      // Explore sub-optimal plans, but if they are too bad, skip them
+      if (current_best <= plan_a.cost - kUniqueSlack) {
+        continue;
+      }
+    } else {
+      if (current_best <= plan_a.cost) {
+        continue;
+      }
+    }
 
-      Consider(AddOp{});
-      Consider(MulOp{});
-      Consider(SubOp{});
-      Consider(Sub2Op{});
-      Consider(ExpOp{});
-      Consider(Exp2Op{});
-      Consider(DivAnd<AddOp>{});
-      Consider(DivAnd<MulOp>{});
-      Consider(DivAnd<SubOp>{});
-      Consider(DivAnd<Sub2Op>{});
-      Consider(DivAnd<ExpOp>{});
-      Consider(DivAnd<Exp2Op>{});
+#pragma omp parallel sections
+    {
+#pragma omp section
+      { Consider<AddOp>(plan_a); }
+#pragma omp section
+      { Consider<MulOp>(plan_a); }
+#pragma omp section
+      { Consider<SubOp>(plan_a); }
+#pragma omp section
+      { Consider<Sub2Op>(plan_a); }
+#pragma omp section
+      { Consider<ExpOp>(plan_a); }
+#pragma omp section
+      { Consider<Exp2Op>(plan_a); }
+#pragma omp section
+      { Consider<DivAnd<AddOp>>(plan_a); }
+#pragma omp section
+      { Consider<DivAnd<MulOp>>(plan_a); }
+#pragma omp section
+      { Consider<DivAnd<SubOp>>(plan_a); }
+#pragma omp section
+      { Consider<DivAnd<Sub2Op>>(plan_a); }
+#pragma omp section
+      { Consider<DivAnd<ExpOp>>(plan_a); }
+#pragma omp section
+      { Consider<DivAnd<Exp2Op>>(plan_a); }
+#pragma omp section
+      { Consider<Div2And<AddOp>>(plan_a); }
+#pragma omp section
+      { Consider<Div2And<MulOp>>(plan_a); }
+#pragma omp section
+      { Consider<Div2And<SubOp>>(plan_a); }
+#pragma omp section
+      { Consider<Div2And<Sub2Op>>(plan_a); }
+#pragma omp section
+      { Consider<Div2And<ExpOp>>(plan_a); }
+#pragma omp section
+      { Consider<Div2And<Exp2Op>>(plan_a); }
     }
   }
+
+  int solutions_found = 0;
+  for (int i = 0; i < N; ++i) {
+    if (!plans[i].empty()) {
+      ++solutions_found;
+    }
+  }
+  LOG << "Found " << solutions_found << "/" << N - 1 << " solutions";
 
   Str result;
   for (auto& plan_set : plans) {
     for (auto& plan : plan_set) {
       result += ToStr(plan) + "\n";
-      LOG << plan;
+      // LOG << plan;
     }
   }
 

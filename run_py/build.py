@@ -78,7 +78,7 @@ if platform != 'win32':
 if 'CXXFLAGS' in os.environ:
     base.compile_args += os.environ['CXXFLAGS'].split()
 
-base.link_args += ['-static', '-fuse-ld=lld']
+base.link_args += ['-fuse-ld=lld']
 
 if 'LDFLAGS' in os.environ:
     for flag in os.environ['LDFLAGS'].split():
@@ -90,8 +90,8 @@ fast.compile_args += ['-O1']
 
 # Build type intended for practical usage (slow to build but very high performance)
 release = BuildType('Release', base)
-release.compile_args += ['-O3', '-DNDEBUG', '-flto', '-fstack-protector', '-fno-trapping-math']
-release.link_args += ['-flto']
+release.compile_args += ['-Ofast', '-DNDEBUG', '-flto', '-fstack-protector', '-fno-trapping-math', '-fopenmp', '-fprofile-use=merged.profdata']
+release.link_args += ['-flto', '-fopenmp', '-L/usr/lib64', '-fprofile-use=merged.profdata']
 
 # Build type intended for debugging
 debug = BuildType('Debug', base)
